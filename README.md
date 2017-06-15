@@ -1,6 +1,6 @@
 #### Current test status
 
-[![Build Status](https://travis-ci.org/sec51/twofactor.svg?branch=master)](https://travis-ci.org/sec51/twofactor.svg?branch=master)
+[![Build Status](https://travis-ci.org/davidwalter0/twofactor.svg?branch=master)](https://travis-ci.org/davidwalter0/twofactor.svg?branch=master)
 [![GoDoc](https://godoc.org/github.com/golang/gddo?status.svg)](https://godoc.org/github.com/sec51/twofactor/)
 
 ## `totp`
