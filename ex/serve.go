@@ -125,7 +125,6 @@ func Validate(w http.ResponseWriter, r *http.Request) {
 		WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
 		return
 	}
-
 	issuer = r.URL.Query().Get("issuer")
 	if issuer == "" {
 		status = "empty issuer missing option"
@@ -142,34 +141,30 @@ func Validate(w http.ResponseWriter, r *http.Request) {
 				log.Println(status)
 				WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
 				return
-			} else {
-				err = totp.Validate(token)
-				if err != nil {
-					status := fmt.Sprintf("Fail %v token %s", err, token)
-					log.Println(status)
-					WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
-					return
-				} else {
-					// log.Println("Successfully validated code")
-					// w.Write([]byte("Successfully validated code"))
-					status = "Successfully validated code"
-					log.Println(status)
-					WriteResult(account, issuer, token, status, w, http.StatusAccepted)
-					return
-				}
 			}
-		} else {
-			status = fmt.Sprintf("User account %s not registered for issuer %s", account, issuer)
+			err = totp.Validate(token)
+			if err != nil {
+				status := fmt.Sprintf("Fail %v token %s", err, token)
+				log.Println(status)
+				WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
+				return
+			}
+			// log.Println("Successfully validated code")
+			// w.Write([]byte("Successfully validated code"))
+			status = "Successfully validated code"
 			log.Println(status)
-			WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
+			WriteResult(account, issuer, token, status, w, http.StatusAccepted)
 			return
 		}
-	} else {
-		status = fmt.Sprintf("Issuer not found %s", issuer)
+		status = fmt.Sprintf("User account %s not registered for issuer %s", account, issuer)
 		log.Println(status)
 		WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
 		return
 	}
+	status = fmt.Sprintf("Issuer not found %s", issuer)
+	log.Println(status)
+	WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
+	return
 }
 
 func run() {

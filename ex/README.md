@@ -5,7 +5,8 @@
 
 
 ```
-    # An example using tls/configured service with letsencrypt certs
+    # Replace example.com with your issuer
+    # Use tls/configured service with letsencrypt certs
     export APP_HTTPS=true
     export APP_HOST=example.com
     export APP_PORT=8443
