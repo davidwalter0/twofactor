@@ -43,7 +43,7 @@ type Totp struct {
 	counter                   [counter_size]byte // this is the counter used to synchronize with the client device
 	digits                    int                // total amount of digits of the code displayed on the device
 	issuer                    string             // the company which issues the 2FA
-	account                   string             // usually the suer email or the account id
+	account                   string             // usually the user email or the account id
 	stepSize                  int                // by default 30 seconds
 	clientOffset              int                // the amount of steps the client is off
 	totalVerificationFailures int                // the total amount of verification failures from the client - by default 10
@@ -270,6 +270,16 @@ func calculateToken(counter []byte, digits int, h hash.Hash) string {
 	return fmt.Sprintf(fmtStr, mod)
 }
 
+// Key raw key bytes
+func (otp *Totp) Key() []byte {
+	return otp.key
+}
+
+// KeyBase32 encoded key string
+func (otp *Totp) KeyBase32() string {
+	return base32.StdEncoding.EncodeToString(otp.key)
+}
+
 // URL returns a suitable URL, such as for the Google Authenticator app
 // example: otpauth://totp/Example:alice@google.com?secret=JBSWY3DPEHPK3PXP&issuer=Example
 func (otp *Totp) url() (string, error) {
@@ -278,8 +288,7 @@ func (otp *Totp) url() (string, error) {
 	if err := totpHasBeenInitialized(otp); err != nil {
 		return "", err
 	}
-
-	secret := base32.StdEncoding.EncodeToString(otp.key)
+	secret := base32.StdEncoding.EncodeToString(otp.key) //
 	u := url.URL{}
 	v := url.Values{}
 	u.Scheme = "otpauth"
