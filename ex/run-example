@@ -1,0 +1,38 @@
+#!/bin/bash
+# set GOROOT or change the sudo command below
+
+# sudo required if you have secure permissions on letsencrypt and not
+# running as privileged uid
+
+# change UID to db authorized user
+
+export AUTH_DRIVER=postgres
+export WRAP_BUFFER_TRACE_ENABLE=true
+if ! [[ ${AUTH_DRIVER:-} ]]; then
+    echo Required AUTH_DRIVER variable is unset
+    return 1
+else
+    case ${AUTH_DRIVER} in
+        pgsql|postgres)
+            export AUTH_DRIVER=postgres
+            export AUTH_PORT=5432
+            export AUTH_HOST=localhost
+            ;;
+        mysql)
+            export AUTH_DRIVER=mysql
+            export AUTH_HOST=localhost
+            export AUTH_PORT=3306
+            ;;
+    esac
+    export AUTH_DATABASE=auth
+    export AUTH_USER=UID
+    export AUTH_PASSWORD=
+fi
+
+export APP_HTTPS=true;
+export APP_HOST=example.com ;
+export APP_PORT=8443 ;
+export APP_CERT=/etc/letsencrypt/live/example.com/cert.pem ;
+export APP_KEY=/etc/letsencrypt/live/example.com/privkey.pem ; 
+
+sudo -E ${GOROOT}/bin/go run serve.go auth.go

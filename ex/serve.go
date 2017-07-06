@@ -14,16 +14,27 @@ package main
 
 import (
 	"crypto"
+	"encoding/base32"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/davidwalter0/envflagstructconfig"
-	"github.com/davidwalter0/twofactor"
-	"golang.org/x/net/http2"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/davidwalter0/go-cfg"
+	"github.com/davidwalter0/twofactor"
+	"golang.org/x/net/http2"
 )
+
+func main() {
+	run()
+}
+
+// Digits number of chars 6 or 8 in the token
+var Digits = 6
 
 // PngTotp pair of elements
 type PngTotp struct {
@@ -132,8 +143,30 @@ func Validate(w http.ResponseWriter, r *http.Request) {
 		WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
 		return
 	}
+
+	var auth = NewKey(account, issuer)
+
+	if auth.Exists() {
+		auth.Read()
+		if _, ok := issuerUserTOTP[issuer]; !ok {
+			issuerUserTOTP[issuer] = make(UserMap)
+		}
+		var err error
+		var totpBytes []byte
+
+		if totpBytes, err = base64.StdEncoding.DecodeString(auth.Totp); err != nil {
+			log.Fatalf(`
+Totp decode failed for string 
+%s
+%s
+%v
+`, auth.Totp, totpBytes, err)
+		}
+		issuerUserTOTP[issuer][account] = PngTotp{Png: []byte{}, Totp: totpBytes}
+	}
 	if userTOTP, ok := issuerUserTOTP[issuer]; ok {
 		if pngTotp, ok := userTOTP[account]; ok {
+
 			totp, err := twofactor.TOTPFromBytes(pngTotp.Totp, issuer)
 			log.Printf("Attempting validation for %s %s %s\n", issuer, account, token)
 			if err != nil {
@@ -160,17 +193,18 @@ func Validate(w http.ResponseWriter, r *http.Request) {
 		log.Println(status)
 		WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
 		return
-	}
+	} // early returns so this doesn't require an else block
 	status = fmt.Sprintf("Issuer not found %s", issuer)
 	log.Println(status)
 	WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
+
 	return
 }
 
 func run() {
 	var jsonText []byte
 	var err error
-	if err = envflagstructconfig.Parse(&app); err != nil {
+	if err = cfg.Parse(&app); err != nil {
 		log.Fatalf("%v\n", err)
 	}
 
@@ -193,8 +227,15 @@ func run() {
 
 }
 
-func main() {
-	run()
+// Exists check for entry of auth object in database
+func (auth *Auth) Exists() (ok bool) {
+	if auth.Count() == 1 {
+		log.Println("We have this guy in the db, skipping.")
+		ok = true
+	} else {
+		log.Println("Who's this guy?")
+	}
+	return
 }
 
 func Qr2FAGenerator(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +259,7 @@ func Qr2FAGenerator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	otp, err := twofactor.NewTOTP(account, issuer, crypto.SHA1, 6)
+	otp, err := twofactor.NewTOTP(account, issuer, crypto.SHA1, Digits)
 	if err != nil {
 		fmt.Println(err)
 		log.Println(err)
@@ -234,13 +275,44 @@ func Qr2FAGenerator(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Content-Length", strconv.Itoa(len(qrBytes)))
 
-	// account is assumed to be an email
+	// account is assumed to be an email for these purposes
 	if _, ok := issuerUserTOTP[issuer]; !ok {
 		issuerUserTOTP[issuer] = make(UserMap)
 	}
 
 	if totpBytes, err := otp.ToBytes(); err == nil {
 		issuerUserTOTP[issuer][account] = PngTotp{Png: qrBytes, Totp: totpBytes}
+		key := otp.Key()
+
+		var auth = NewKey(account, issuer)
+
+		if auth.Exists() {
+			log.Println("We have this guy in the db, skipping.")
+			auth.Totp = base64.StdEncoding.EncodeToString(totpBytes)
+			auth.Key = otp.KeyBase32()
+			auth.Digits = Digits
+			auth.Hash = "sha1"
+			auth.Update()
+		} else {
+			log.Println("Who's this guy?")
+			auth.Totp = base64.StdEncoding.EncodeToString(totpBytes)
+			auth.Key = otp.KeyBase32()
+			auth.Digits = Digits
+			auth.Hash = "sha1"
+			auth.Create()
+		}
+		_ = ioutil.WriteFile(auth.GUID+".png", qrBytes, 0644)
+
+		log.Println("key: ", fmt.Sprintf("%0x", (key)))
+		log.Println("raw key: ", key)
+		log.Println("b32key : ", otp.KeyBase32())
+		log.Println(base64.StdEncoding.EncodeToString(totpBytes))
+		log.Println(base32.StdEncoding.EncodeToString(totpBytes))
+		otpText, err := otp.OTP()
+		if err != nil {
+			log.Println(err)
+		}
+		log.Println("otp: ", otpText)
 
 		if _, err = w.Write(qrBytes); err != nil {
 			http.Error(w, "", http.StatusInternalServerError)
