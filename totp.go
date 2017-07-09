@@ -120,21 +120,21 @@ func makeTOTP(key []byte, account, issuer string, hash crypto.Hash, digits int) 
 // There is a very basic method which protects from timing attacks, although if the step time used is low it should not be necessary
 // An attacker can still learn the synchronization offset. This is however irrelevant because the attacker has then 30 seconds to
 // guess the code and after 3 failures the function returns an error for the following 5 minutes
-func (otp *Totp) Validate(userCode string) error {
+func (otp *Totp) Validate(userCode string) (string, error) {
 
 	// check Totp initialization
 	if err := totpHasBeenInitialized(otp); err != nil {
-		return err
+		return "", err
 	}
 
 	// verify that the token is valid
 	if userCode == "" {
-		return errors.New("User provided token is empty")
+		return "", errors.New("User provided token is empty")
 	}
 
 	// check against the total amount of failures
 	if otp.totalVerificationFailures >= max_failures && !validBackoffTime(otp.lastVerificationTime) {
-		return LockDownError
+		return "", LockDownError
 	}
 
 	if otp.totalVerificationFailures >= max_failures && validBackoffTime(otp.lastVerificationTime) {
@@ -158,26 +158,26 @@ func (otp *Totp) Validate(userCode string) error {
 
 	// if the current time token is valid then, no need to re-sync and return nil
 	if tokens[1] == userToken {
-		return nil
+		return "", nil
 	}
 
 	// if the 30 seconds ago token is valid then return nil, but re-synchronize
 	if tokens[0] == userToken {
 		otp.synchronizeCounter(-1)
-		return nil
+		return "", nil
 	}
 
 	// if the let's say 30 seconds ago token is valid then return nil, but re-synchronize
 	if tokens[2] == userToken {
 		otp.synchronizeCounter(1)
-		return nil
+		return "", nil
 	}
 
 	otp.totalVerificationFailures++
 	otp.lastVerificationTime = time.Now().UTC() // important to have it in UTC
 
 	// if we got here everything is good
-	return errors.New("Tokens mismatch.")
+	return calculateTOTP(otp, 0), errors.New("Token mismatch")
 }
 
 // Checks the time difference between the function call time and the parameter

@@ -71,6 +71,7 @@ type Auth struct {
 	Changed time.Time         `json:"changed"`
 	Key     string            `json:"key"  usage:"base32 encoded totp key"`
 	Totp    string            `json:"totp" usage:"base64 encoded totp object"`
+	Png     string            `json:"png"  usage:"base64 encoded png image"`
 	DB      *persist.Database `ignore:"true"`
 }
 
@@ -139,7 +140,7 @@ VALUES ('%s', '%s', '%s', '%s', %d, '%s', '%s', CURRENT_TIMESTAMP, CURRENT_TIMES
 	fmt.Println("Count", auth.Count())
 }
 
-func (auth *Auth) Read() {
+func (auth *Auth) Read() bool {
 	authDB := auth.DB
 	// ignore DB & id
 	query := fmt.Sprintf(`
@@ -193,7 +194,9 @@ AND
 			auth.Created,
 			auth.Changed)
 	}
-	fmt.Println("Count", auth.Count())
+	count := auth.Count()
+	fmt.Println("Count", count)
+	return count != 0
 }
 
 func (auth *Auth) Update() {
