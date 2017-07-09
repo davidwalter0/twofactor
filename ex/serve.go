@@ -19,6 +19,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -27,33 +28,54 @@ import (
 	"strings"
 
 	"github.com/davidwalter0/go-cfg"
+	"github.com/davidwalter0/go-mutex"
 	"github.com/davidwalter0/twofactor"
 	"golang.org/x/net/http2"
 )
 
 var debugging = false
+var monitor = mutex.NewMutex()
 
 func main() {
 	run()
 }
 
+func run() {
+	var jsonText []byte
+	var err error
+	if err = cfg.Parse(&app); err != nil {
+		log.Fatalf("%v\n", err)
+	}
+
+	jsonText, _ = json.MarshalIndent(&app, "", "  ")
+	protocol := "https://"
+
+	log.Printf("\nEnvironment configuration\n%v\n", string(jsonText))
+	log.Println("Answering requests on " + protocol + app.Host + ":" + app.Port)
+
+	handler := My2FAGeneratorHandler{}
+	server := http.Server{
+		Addr:    app.Host + ":" + app.Port,
+		Handler: &handler,
+	}
+	http2.ConfigureServer(&server, &http2.Server{})
+	err = server.ListenAndServeTLS(app.Cert, app.Key)
+	if err != nil {
+		log.Fatal("ListenAndServe: ", err)
+	}
+
+}
+
 // Digits number of chars 6 or 8 in the token
 var Digits = 6
 
-// PngTotp pair of elements
-type PngTotp struct {
-	Png  []byte
-	Totp []byte
-	Key  []byte
-}
+// AccountMap account / email TOTP
+type AccountMap map[string]*Auth
 
-// UserMap account / email TOTP
-type UserMap map[string]PngTotp
+// IssuerMap map by issuer of of account/email totp token bytes
+type IssuerMap map[string]AccountMap
 
-// IssuerUserTOTP map by issuer of of account/email totp token bytes
-type IssuerUserTOTP map[string]UserMap
-
-var issuerUserTOTP = make(IssuerUserTOTP)
+var issuerMap = make(IssuerMap)
 
 // App application configuration struct
 type App struct {
@@ -113,165 +135,222 @@ func KeyResult(key, status string) KeyReponse {
 
 // WriteResult of validation to http.ResponseWriter
 func WriteResult(account, issuer, token, status string, w http.ResponseWriter, code int) {
-	// var data []byte
-	// var err error
 	log.Println("WriteResult: account:", account, "issuer:", issuer, "token:", token, "status:", status)
-	//	var results Results = Result(account, issuer, token, status)
 	var results = Result(account, issuer, token, status)
 	log.Println("WriteResult > ", results)
 	log.Printf("WriteResult > %v\n", results)
 	if data, err := json.Marshal(&results); err == nil {
 		log.Println(err, string(data))
 		if _, err = w.Write(data); err != nil {
-			http.Error(w, status, http.StatusInternalServerError)
+			http.Error(w, status, http.StatusNotFound)
 		}
 	} else {
 		log.Println("Marshal failed", err)
 	}
 }
 
-// Validate a token requested for account and issuer from request string
+// Lookup issuer/account in issuerMap for the secrets map
+func Lookup(issuer, account string) (auth *Auth, err error) {
+	defer monitor.Monitor()()
+	if _, ok := issuerMap[issuer]; !ok {
+		issuerMap[issuer] = make(AccountMap)
+	}
+	accountMap := issuerMap[issuer]
+
+	if a, ok := accountMap[account]; !ok {
+		if auth = DBLookup(issuer, account); auth == nil {
+			err = fmt.Errorf("Issuer %s Account %s not found", issuer, account)
+			return
+		}
+	} else {
+		auth = a
+	}
+	return
+}
+
+// DBLookup go to the persistent storage for this issuer/account add
+// to the issuerMap map if found
+func DBLookup(issuer, account string) (auth *Auth) {
+	auth = NewKey(account, issuer)
+	if auth.Exists() {
+		auth.Read()
+		auth.TotpRestore()
+	} else {
+		auth = nil
+	}
+	return
+}
+
+// TotpStore encoded types to raw types, enter with otp object initialized
+func (auth *Auth) TotpStore() {
+	if auth.otp == nil {
+		log.Fatalf(`TotpStore: otp nil / not set exiting`)
+	}
+
+	var err error
+	auth.Key = auth.otp.KeyBase32()
+	auth.key = auth.otp.Key()
+
+	if auth.totp, err = auth.otp.ToBytes(); err != nil {
+		log.Fatalf(`
+otp ToBytes failed for string 
+%s
+%s
+%v
+`, auth.otp, auth.totp, err)
+	}
+
+	if auth.Totp = base64.StdEncoding.EncodeToString(auth.totp); len(auth.Totp) == 0 {
+		log.Fatalf(`
+Totp encode failed for string 
+%s
+%s
+`, auth.Totp, auth.totp)
+	}
+
+	if auth.png, err = auth.otp.QR(); err != nil {
+		log.Fatalf(`
+png QR create failed for string 
+%s
+%s
+%v
+`, auth.png, auth.Totp, err)
+	}
+
+	// 	if auth.totp, err = base64.StdEncoding.DecodeString(auth.Totp); err != nil {
+	// 		log.Fatalf(`
+	// Totp decode failed for string
+	// %s
+	// %s
+	// %v
+	// `, auth.Totp, auth.totp, err)
+	// 	}
+
+	// 	if auth.otp, err = twofactor.TOTPFromBytes(auth.totp, auth.Issuer); err != nil {
+	// 		log.Fatalf(`
+	// otp TOTPFromBytes failed for string
+	// %s
+	// %s
+	// %v
+	// `, auth.otp, auth.Totp, err)
+	// 	}
+
+}
+
+// TotpRestore encoded types to raw types
+func (auth *Auth) TotpRestore() {
+	if len(auth.Totp) == 0 || len(auth.Key) == 0 {
+		log.Fatalf(`TotpStore: totp %v len 0 or key %v len 0`, auth.Totp, auth.Key)
+	}
+
+	var err error
+
+	if auth.totp, err = base64.StdEncoding.DecodeString(auth.Totp); err != nil {
+		log.Fatalf(`
+Totp encode failed for string 
+%s
+%s
+%v
+`, auth.Totp, auth.totp, err)
+	}
+
+	if auth.otp, err = twofactor.TOTPFromBytes(auth.totp, auth.Issuer); err != nil {
+		log.Fatalf(`
+	otp TOTPFromBytes failed for string
+	%s
+	%s
+	%v
+	`, auth.otp, auth.Totp, err)
+	}
+
+	auth.key = b32Decode(auth.Key)
+
+	if auth.png, err = auth.otp.QR(); err != nil {
+		log.Fatalf(`
+png QR create failed for string 
+%s
+%s
+%v
+`, auth.png, auth.Totp, err)
+	}
+}
+
+// ParseTokenArgs parse helper
+func ParseTokenArgs(r *http.Request) (token string, err error) {
+	token = r.URL.Query().Get("token")
+	if token == "" {
+		err = errors.New("empty token missing option")
+	}
+	return
+}
+
+// ParseArgs parse helper
+func ParseArgs(r *http.Request) (issuer, account string, err error) {
+	issuer = r.URL.Query().Get("issuer")
+	if issuer == "" {
+		err = errors.New("empty issuer missing option")
+		return
+	}
+
+	account = r.URL.Query().Get("account")
+	if account == "" {
+		err = errors.New("empty account missing option")
+		return
+	}
+	return
+}
+
+// ParseValidationArgs parse helper
+func ParseValidationArgs(r *http.Request) (issuer, account, token string, err error) {
+	if issuer, account, err = ParseArgs(r); err == nil {
+		token, err = ParseTokenArgs(r)
+	}
+	return
+}
+
+// Validate a token requested for account and issuer from request
+// string
 func Validate(w http.ResponseWriter, r *http.Request) {
+	var err error
+	var account, issuer, token, status string
+	var auth *Auth
+	var shouldBe string
+
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 	w.Header().Set("Access-Control-Allow-Headers",
 		"Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
 
-	var account, issuer, token, status string
-	token = r.URL.Query().Get("token")
-	if token == "" {
-		status = "empty token missing option"
-		log.Println(status, http.StatusInternalServerError)
-		WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
+	if issuer, account, token, err = ParseValidationArgs(r); err != nil {
+		status = fmt.Sprintf("%v", err)
+		log.Println(status, http.StatusNotFound)
+		WriteResult(account, issuer, token, status, w, http.StatusNotFound)
 		return
 	}
 
-	account = r.URL.Query().Get("account")
-	if account == "" {
-		status = "empty account missing option"
-		log.Println(status, http.StatusInternalServerError)
-		WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
-		return
-	}
-	issuer = r.URL.Query().Get("issuer")
-	if issuer == "" {
-		status = "empty issuer missing option"
-		log.Println(status, http.StatusInternalServerError)
-		WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
+	if auth, err = Lookup(issuer, account); err != nil {
+		status = fmt.Sprintf("%v", err)
+		log.Println(status, http.StatusNotFound)
+		WriteResult(account, issuer, token, status, w, http.StatusNotFound)
 		return
 	}
 
-	var auth = NewKey(account, issuer)
-
-	if auth.Exists() {
-		auth.Read()
-		if _, ok := issuerUserTOTP[issuer]; !ok {
-			issuerUserTOTP[issuer] = make(UserMap)
-		}
-
-		var err error
-		var totpBytes []byte
-		var png []byte
-		var key []byte
-
-		if key, err = base32.StdEncoding.DecodeString(auth.Key); err != nil {
-			log.Fatalf(`
-Png decode failed for string 
-%s
-%s
-%v
-`, auth.Key, key, err)
-		}
-
-		if png, err = base64.StdEncoding.DecodeString(auth.Png); err != nil {
-			log.Fatalf(`
-Png decode failed for string 
-%s
-%s
-%v
-`, auth.Png, png, err)
-		}
-
-		if totpBytes, err = base64.StdEncoding.DecodeString(auth.Totp); err != nil {
-			log.Fatalf(`
-Totp decode failed for string 
-%s
-%s
-%v
-`, auth.Totp, totpBytes, err)
-		}
-		issuerUserTOTP[issuer][account] = PngTotp{Png: png, Totp: totpBytes, Key: key}
-	}
-
-	if userTOTP, ok := issuerUserTOTP[issuer]; ok {
-		if pngTotp, ok := userTOTP[account]; ok {
-
-			totp, err := twofactor.TOTPFromBytes(pngTotp.Totp, issuer)
-			log.Printf("Attempting validation for %s %s %s\n", issuer, account, token)
-			if err != nil {
-				status := fmt.Sprintf("Unable to create OTP from bytes %s %v", token, err)
-				log.Println(status)
-				WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
-				return
-			}
-
-			var shouldBe string
-			shouldBe, err = totp.Validate(token)
-
-			if err != nil {
-				if debugging {
-					status = fmt.Sprintf("Fail %v token %s, wanted %s", err, token, shouldBe)
-				} else {
-					status = fmt.Sprintf("Fail %v token %s", err, token)
-				}
-				log.Println(status)
-				WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
-				return
-			}
-			// log.Println("Successfully validated code")
-			// w.Write([]byte("Successfully validated code"))
-			status = "Successfully validated code"
-			log.Println(status)
-			WriteResult(account, issuer, token, status, w, http.StatusAccepted)
-			return
-		}
-		status = fmt.Sprintf("User account %s not registered for issuer %s", account, issuer)
-		log.Println(status)
-		WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
-		return
-	} // early returns so this doesn't require an else block
-	status = fmt.Sprintf("Issuer not found %s", issuer)
-	log.Println(status)
-	WriteResult(account, issuer, token, status, w, http.StatusInternalServerError)
-
-	return
-}
-
-func run() {
-	var jsonText []byte
-	var err error
-	if err = cfg.Parse(&app); err != nil {
-		log.Fatalf("%v\n", err)
-	}
-
-	jsonText, _ = json.MarshalIndent(&app, "", "  ")
-	protocol := "https://"
-
-	log.Printf("\nEnvironment configuration\n%v\n", string(jsonText))
-	log.Println("Answering requests on " + protocol + app.Host + ":" + app.Port)
-
-	handler := My2FAGeneratorHandler{}
-	server := http.Server{
-		Addr:    app.Host + ":" + app.Port,
-		Handler: &handler,
-	}
-	http2.ConfigureServer(&server, &http2.Server{})
-	err = server.ListenAndServeTLS(app.Cert, app.Key)
+	shouldBe, err = auth.otp.Validate(token)
 	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
+		if debugging {
+			status = fmt.Sprintf("Fail %v token %s, wanted %s", err, token, shouldBe)
+		} else {
+			status = fmt.Sprintf("Fail %v token %s", err, token)
+		}
+		log.Println(status)
+		WriteResult(account, issuer, token, status, w, http.StatusUnauthorized)
+		return
 	}
-
+	status = "Successfully validated code"
+	log.Println(status)
+	WriteResult(account, issuer, token, status, w, http.StatusAccepted)
+	return
 }
 
 // Exists check for entry of auth object in database
@@ -285,7 +364,11 @@ func (auth *Auth) Exists() (ok bool) {
 	return
 }
 
+// Qr2FAGenerator create png
 func Qr2FAGenerator(w http.ResponseWriter, r *http.Request) {
+	var err error
+	var account, issuer, status string
+	var auth *Auth
 
 	log.Println("https://"+app.Host+":"+app.Port, r.Body, r)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -293,96 +376,56 @@ func Qr2FAGenerator(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers",
 		"Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
 
-	account := r.URL.Query().Get("account")
-	if account == "" {
-		log.Println("empty account missing option", http.StatusInternalServerError)
-		http.Error(w, "empty account missing option", http.StatusInternalServerError)
-		return
-	}
-	issuer := r.URL.Query().Get("issuer")
-	if issuer == "" {
-		log.Println("empty issuer missing option", http.StatusInternalServerError)
-		http.Error(w, "empty issuer missing option", http.StatusInternalServerError)
+	if issuer, account, err = ParseArgs(r); err != nil {
+		status = fmt.Sprintf("%v", err)
+		log.Println(status, http.StatusNotFound)
+		http.Error(w, status, http.StatusNotFound)
 		return
 	}
 
-	otp, err := twofactor.NewTOTP(account, issuer, crypto.SHA1, Digits)
-	if err != nil {
-		fmt.Println(err)
-		log.Println(err)
-		http.Error(w, fmt.Sprintf("%v TOTP call failed", err), http.StatusInternalServerError)
-	}
-	qrBytes, err := otp.QR()
-	if err != nil {
-		fmt.Println(err)
-		log.Println(err)
-		http.Error(w, fmt.Sprintf("%v QR code generation failed", err), http.StatusInternalServerError)
-	}
+	if auth, err = Lookup(issuer, account); err != nil {
+		auth = NewKey(account, issuer)
 
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Content-Length", strconv.Itoa(len(qrBytes)))
-
-	// account is assumed to be an email for these purposes
-	if _, ok := issuerUserTOTP[issuer]; !ok {
-		issuerUserTOTP[issuer] = make(UserMap)
-	}
-
-	if totpBytes, err := otp.ToBytes(); err == nil {
-		key := otp.Key()
-		pngTotp := PngTotp{Png: qrBytes, Totp: totpBytes, Key: key}
-		issuerUserTOTP[issuer][account] = pngTotp
-
-		var auth = NewKey(account, issuer)
-
-		if auth.Exists() {
-			log.Println("We have this guy in the db, skipping.")
-			auth.Read()
-			auth.Totp = b64Encode(totpBytes)
-			auth.Key = otp.KeyBase32()
-			auth.Digits = Digits
-			auth.Hash = "sha1"
-			auth.Png = b64Encode(pngTotp.Png)
-			auth.Update()
-		} else {
-			log.Println("Who's this guy?")
-			auth.Totp = b64Encode(totpBytes)
-			auth.Key = otp.KeyBase32()
-			auth.Digits = Digits
-			auth.Hash = "sha1"
-			auth.Create()
-			auth.Read()
-		}
-		_ = ioutil.WriteFile(auth.GUID+".png", qrBytes, 0644)
-
-		log.Println("raw key: ", key)
-		log.Println("b32key : ", otp.KeyBase32())
-		log.Println(b64Encode(totpBytes))
-		otpText, err := otp.OTP()
-		if err != nil {
+		if auth.otp, err = twofactor.NewTOTP(account, issuer, crypto.SHA1, Digits); err != nil {
 			log.Println(err)
-		}
-		log.Println("otp: ", otpText)
-
-		if _, err = w.Write(qrBytes); err != nil {
-			http.Error(w, "", http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("%v TOTP call failed", err), http.StatusInternalServerError)
 			return
 		}
-	} else {
-		fmt.Println(err)
-		log.Println(err)
+		auth.TotpStore()
+		auth.Digits = Digits
+		auth.Hash = "sha1"
+		auth.Create()
+		auth.Read()
+		defer monitor.Monitor()()
+		if _, ok := issuerMap[issuer]; !ok {
+			issuerMap[issuer] = make(AccountMap)
+		}
+
+		log.Println("Who's this guy?")
+		issuerMap[issuer][account] = auth
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Length", strconv.Itoa(len(auth.png)))
+
+	_ = ioutil.WriteFile(auth.GUID+".png", auth.png, 0644)
+
+	log.Println("raw key: ", auth.key)
+	log.Println("b32key : ", auth.otp.KeyBase32())
+	log.Println(b64Encode(auth.totp))
+
+	if _, err = w.Write(auth.png); err != nil {
+		http.Error(w, "", http.StatusNotFound)
+		return
 	}
 }
 
 // KeyQuery .../key/?account=&issuer... -> key+status
 func KeyQuery(w http.ResponseWriter, r *http.Request) {
-	var status string
-	var key string
-	var totp *twofactor.Totp
-	var png []byte
-	var ok bool
-	var pngTotp PngTotp
+	var account, issuer, status string
+
+	var auth *Auth
 	var err error
-	var totpBytes []byte
+	var data []byte
 
 	log.Println("https://"+app.Host+":"+app.Port, r.Body, r)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -390,63 +433,33 @@ func KeyQuery(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers",
 		"Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
 
-	account := r.URL.Query().Get("account")
-	if account == "" {
-		log.Println("empty account missing option", http.StatusInternalServerError)
-		http.Error(w, "empty account missing option", http.StatusInternalServerError)
+	if issuer, account, err = ParseArgs(r); err != nil {
+		status = fmt.Sprintf("%v", err)
+		log.Println(status, http.StatusNotFound)
+		http.Error(w, status, http.StatusNotFound)
 		return
 	}
-	issuer := r.URL.Query().Get("issuer")
-	if issuer == "" {
-		log.Println("empty issuer missing option", http.StatusInternalServerError)
-		http.Error(w, "empty issuer missing option", http.StatusInternalServerError)
-		return
-	}
-	var auth = NewKey(account, issuer)
 
-	// account is assumed to be an email for these purposes
-	if _, ok := issuerUserTOTP[issuer]; !ok {
-		issuerUserTOTP[issuer] = make(UserMap)
-	}
-
-	// issuerUserTOTP[issuer][account] =
-	if pngTotp, ok = issuerUserTOTP[issuer][account]; !ok {
-		if auth.Read() {
-			totpBytes = b64Decode(auth.Totp)
-			if totp, err = twofactor.TOTPFromBytes(totpBytes, issuer); err != nil {
-				http.Error(w, fmt.Sprintf("Internal error bytes to totp %v", err),
-					http.StatusInternalServerError)
-				return
-			}
-			if png, err = totp.QR(); err != nil {
-				http.Error(w, fmt.Sprintf("Internal png generation error png %v", err),
-					http.StatusInternalServerError)
-				return
-			}
-			pngTotp = PngTotp{
-				Png:  png,
-				Totp: b64Decode(auth.Totp),
-				Key:  b32Decode(auth.Key),
+	if auth, err = Lookup(issuer, account); err == nil {
+		log.Println(auth.Key)
+		status = "Found issuer/account key"
+		log.Println(status)
+		results := KeyResult(auth.Key, status)
+		if data, err = json.Marshal(&results); err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Type", strconv.Itoa(len(data)))
+			if _, err = w.Write(data); err != nil {
+				http.Error(w, status, http.StatusNotFound)
 			}
 		} else {
-			http.Error(w, "User not found", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	log.Println(pngTotp.Key)
-	key = b32Encode(pngTotp.Key)
-	w.Header().Set("Content-Type", "application/json")
-	status = "Found issuer/account key"
-	log.Println(status)
-	results := KeyResult(key, status)
-	if data, err := json.Marshal(&results); err == nil {
-		log.Println(err, string(data))
-		if _, err = w.Write(data); err != nil {
-			http.Error(w, status, http.StatusInternalServerError)
+			status = fmt.Sprintf("Marshal failed %v", err)
+			log.Println(status)
+			http.Error(w, status, http.StatusNotFound)
 		}
 	} else {
-		log.Println("Marshal failed", err)
+		status = fmt.Sprintf("issuer/account not found %v", err)
+		log.Println(status, http.StatusNotFound)
+		http.Error(w, status, http.StatusNotFound)
 	}
 	return
 
