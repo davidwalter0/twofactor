@@ -163,6 +163,9 @@ func Lookup(issuer, account string) (auth *Auth, err error) {
 			return
 		}
 	} else {
+		log.Println("************************************************************************")
+		log.Println("auth", a)
+		log.Println("************************************************************************")
 		auth = a
 	}
 	return
@@ -216,24 +219,6 @@ png QR create failed for string
 %v
 `, auth.png, auth.Totp, err)
 	}
-
-	// 	if auth.totp, err = base64.StdEncoding.DecodeString(auth.Totp); err != nil {
-	// 		log.Fatalf(`
-	// Totp decode failed for string
-	// %s
-	// %s
-	// %v
-	// `, auth.Totp, auth.totp, err)
-	// 	}
-
-	// 	if auth.otp, err = twofactor.TOTPFromBytes(auth.totp, auth.Issuer); err != nil {
-	// 		log.Fatalf(`
-	// otp TOTPFromBytes failed for string
-	// %s
-	// %s
-	// %v
-	// `, auth.otp, auth.Totp, err)
-	// 	}
 
 }
 
@@ -364,7 +349,7 @@ func (auth *Auth) Exists() (ok bool) {
 	return
 }
 
-// Qr2FAGenerator create png
+// Qr2FAGenerator create & return png
 func Qr2FAGenerator(w http.ResponseWriter, r *http.Request) {
 	var err error
 	var account, issuer, status string
