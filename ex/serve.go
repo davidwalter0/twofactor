@@ -33,6 +33,8 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// debugging may leave unsafe breadcrumbs like files with secure
+// runtime info
 var debugging = false
 var monitor = mutex.NewMutex()
 
@@ -392,7 +394,9 @@ func Qr2FAGenerator(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Content-Length", strconv.Itoa(len(auth.png)))
 
-	_ = ioutil.WriteFile(auth.GUID+".png", auth.png, 0644)
+	if debugging { // unsafe option
+		_ = ioutil.WriteFile(auth.GUID+".png", auth.png, 0644)
+	}
 
 	log.Println("raw key: ", auth.key)
 	log.Println("b32key : ", auth.otp.KeyBase32())

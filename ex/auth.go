@@ -94,7 +94,7 @@ func NewKey(email, issuer string) *Auth {
 	}
 }
 
-// NewAuth initialize an auth struct, notice that email uses account
+// NewAuth initialize an auth struct
 func NewAuth(email, issuer, hash string, key, totpBytes []byte, digits int) *Auth {
 	return &Auth{
 		Email:  email,
@@ -108,7 +108,7 @@ func NewAuth(email, issuer, hash string, key, totpBytes []byte, digits int) *Aut
 	}
 }
 
-// CopyAuth initialize an auth struct, notice that email uses account
+// CopyAuth initialize an auth struct
 func (auth *Auth) CopyAuth(from *Auth) {
 	auth.Email = from.Email
 	auth.Issuer = from.Issuer
@@ -123,7 +123,7 @@ func (auth *Auth) CopyAuth(from *Auth) {
 	auth.db = from.db
 }
 
-// CopyKey initialize an auth struct, notice that email uses account
+// CopyKey initialize the auth's table key in the struct
 func (auth *Auth) CopyKey(from *Auth) {
 	auth.Email = from.Email
 	auth.Issuer = from.Issuer
